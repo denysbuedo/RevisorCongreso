@@ -5,14 +5,12 @@ import requests
 from docx import Document
 from bs4 import BeautifulSoup
 import re
-import shutil
+from langdetect import detect
 
 CARPETA_TRABAJOS = "./trabajos"
 CARPETA_REPORTES = "./reportes"
 CARPETA_REVISADOS = "./trabajos_revisados"
 URL_LT = "http://localhost:8010/v2/check"
-
-PALABRAS_IGNORADAS_EN = {"the", "and", "university", "education", "research", "study", "students", "learning", "abstract", "keywords", "introduction", "conclusion", "psychopedagogical", "actions"}
 
 def convertir_doc_a_docx():
     print("▶ Convirtiendo archivos .doc a .docx (si existen)...")
@@ -23,6 +21,12 @@ def convertir_doc_a_docx():
                 "libreoffice", "--headless", "--convert-to", "docx", origen, "--outdir", CARPETA_TRABAJOS
             ])
 
+def es_palabra_inglesa(palabra):
+    try:
+        return detect(palabra) == "en"
+    except:
+        return False
+
 def revisar_ortografia(texto):
     errores = []
     try:
@@ -30,12 +34,16 @@ def revisar_ortografia(texto):
         data = response.json()
         for match in data.get("matches", []):
             ctx = match.get("context", {})
-            palabra = ctx.get("text", "")[ctx.get("offset", 0):ctx.get("offset", 0)+ctx.get("length", 0)]
-            if palabra.lower() not in PALABRAS_IGNORADAS_EN:
-                errores.append({
-                    "message": match.get("message"),
-                    "context": ctx
-                })
+            text = ctx.get("text", "")
+            off = ctx.get("offset", 0)
+            length = ctx.get("length", 0)
+            palabra = text[off:off+length].strip()
+            if not palabra or es_palabra_inglesa(palabra.lower()):
+                continue
+            errores.append({
+                "message": match.get("message"),
+                "context": ctx
+            })
     except Exception as e:
         errores.append({
             "message": f"Error de conexión con LanguageTool: {e}",
@@ -61,7 +69,7 @@ def validar_formato(texto):
     errores = []
     if "Verdana" not in texto:
         errores.append("Fuente incorrecta: no se detecta 'Verdana'")
-    if "\t" in texto or "	" in texto:
+    if "\t" in texto:
         errores.append("Uso de tabuladores detectado")
     if "left" in texto.lower():
         errores.append("Texto no justificado")
@@ -71,18 +79,23 @@ def validar_referencias(texto):
     refs = []
     for linea in texto.splitlines():
         if any(pal in linea.lower() for pal in [str(y) for y in range(2000, 2026)] + ["doi", "http"]):
-            cumple = bool(re.search(r"[A-Z][a-z]+, [A-Z]\.", linea)) and bool(re.search(r"\(\d{4}\)", linea)) or re.search(r"\(\d{4}\)", linea)
+            cumple = bool(re.search(r"[A-Z][a-z]+, [A-Z]\.", linea)) and bool(re.search(r"\(\d{4}\)", linea))
             refs.append((linea.strip(), cumple))
     return refs
 
 def generar_html(nombre_archivo, estructura, ortografia, formato, referencias):
     html = BeautifulSoup("<html><head><meta charset='utf-8'><title>Reporte</title></head><body></body></html>", "html.parser")
     body = html.body
-    h1 = html.new_tag("h1")
-    h1.string = "📘 Informe del revisar Automático del Congreso Universidad 2026"
-    body.append(h1)
+    titulo = html.new_tag("h1")
+    titulo.string = "📘 Informe del revisar Automático del Congreso Universidad 2026"
+    body.append(titulo)
 
-    body.append(html.new_tag("h2")).string = "I. 📚 Estructura del manuscrito"
+    subtitulo = html.new_tag("h2")
+    subtitulo.string = f"📄 Archivo revisado: {nombre_archivo}"
+    body.append(subtitulo)
+
+    # Estructura
+    body.append(html.new_tag("h2", string="I. 📚 Estructura del manuscrito"))
     ul1 = html.new_tag("ul")
     for item, ok in estructura:
         li = html.new_tag("li")
@@ -90,7 +103,8 @@ def generar_html(nombre_archivo, estructura, ortografia, formato, referencias):
         ul1.append(li)
     body.append(ul1)
 
-    body.append(html.new_tag("h2")).string = "II. 📝 Revisión ortográfica y gramatical"
+    # Ortografía
+    body.append(html.new_tag("h2", string="II. 📝 Revisión ortográfica y gramatical"))
     ul2 = html.new_tag("ul")
     for err in ortografia:
         ctx = err["context"]
@@ -101,7 +115,7 @@ def generar_html(nombre_archivo, estructura, ortografia, formato, referencias):
         palabra = text[off:off+length]
         resaltado = f"{text[:off]}<mark>{palabra}</mark>{text[off+length:]}"
         li = html.new_tag("li")
-        li.append(html.new_tag("strong")).string = f"{palabra}: "
+        li.append(html.new_tag("strong", string=f"{palabra}: "))
         li.append(msg)
         p = html.new_tag("p")
         p.append(BeautifulSoup(resaltado, "html.parser"))
@@ -109,7 +123,8 @@ def generar_html(nombre_archivo, estructura, ortografia, formato, referencias):
         ul2.append(li)
     body.append(ul2)
 
-    body.append(html.new_tag("h2")).string = "III. 📐 Formato del documento"
+    # Formato
+    body.append(html.new_tag("h2", string="III. 📐 Formato del documento"))
     ul3 = html.new_tag("ul")
     for err in formato:
         li = html.new_tag("li")
@@ -117,7 +132,8 @@ def generar_html(nombre_archivo, estructura, ortografia, formato, referencias):
         ul3.append(li)
     body.append(ul3)
 
-    body.append(html.new_tag("h2")).string = "IV. 📖 Revisión básica de estilo APA"
+    # APA
+    body.append(html.new_tag("h2", string="IV. 📖 Revisión básica de estilo APA"))
     ul4 = html.new_tag("ul")
     for ref, ok in referencias:
         li = html.new_tag("li")
@@ -148,8 +164,7 @@ def procesar_trabajos():
             nombre = os.path.splitext(archivo)[0]
             generar_html(nombre, estructura, ortografia, formato, referencias)
 
-            # mover el trabajo revisado
-            shutil.move(ruta, os.path.join(CARPETA_REVISADOS, archivo))
+            os.rename(ruta, os.path.join(CARPETA_REVISADOS, archivo))
 
 if __name__ == "__main__":
     procesar_trabajos()
